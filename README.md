@@ -1,6 +1,6 @@
 # apim-incident-tools
 
-Read-only PowerShell scripts for checking whether an Azure tenant may be affected by the **Azure API Management (APIM) Classic-tier security issue** that Microsoft notified customers about in November 2026, and for reviewing Key Vault audit logs for signs of misuse.
+PowerShell scripts for checking whether an Azure tenant may be affected by the **Azure API Management (APIM) Classic-tier security issue** that Microsoft notified customers about in November 2026, reviewing Key Vault audit logs for signs of misuse, and performing selected, individually confirmed credential operations.
 
 > **Status: untested, community-style tooling.** The scripts were written quickly during an incident and have been run in only one environment. Review them before running, and verify results independently. They do not replace Microsoft's guidance or your own security team's judgement.
 
@@ -58,7 +58,8 @@ Malformed, duplicate or unrecognized `inScope` values stop the run rather than s
 | `Check-ApimExposure.ps1` | Finds APIM instances across all subscriptions you can read, flags Classic tiers, and checks network settings. Lists named values, certificates, identity providers and other secret-bearing objects, APIM subscriptions, and whether the direct management API and Git access are enabled. Also maps what each instance's managed identity can reach. |
 | `Check-KeyVaultAudit.ps1` | Can run without the exposure scan. Finds the vaults that APIM managed identities can read from, or can grant themselves access to. Checks whether audit logging is enabled, and queries Log Analytics for identity activity and new callers in a time window. |
 | `Analyze-Findings.ps1` | Follow-up analysis of the two scripts' output. Classifies the secrets held by APIM and flags environment mixing, reused secret names, all-access subscriptions, leftover logger credentials and literal backend credentials. Resolves flagged Key Vault callers in Entra ID, drills into their log history and gives each a heuristic verdict. Writes a Markdown report and can compare with a previous run. |
-| `Apim-Helpers.ps1` | Shared SKU, scope, identity, CLI, timestamp and response validation. Must remain alongside all three entry scripts. |
+| `Rotate-ApimCredential.ps1` | Opt-in, one-at-a-time subscription and legacy management key regeneration, APIM secret named-value updates, and Key Vault named-value refreshes. Requires a matching in-scope exposure scan and confirmation. |
+| `Apim-Helpers.ps1` | Shared SKU, scope, identity, CLI, timestamp and response validation. Must remain alongside the entry scripts. |
 | `docs/response-checklist.md` | Generic checklist for persistence checks, rotation and reporting steps. Not legal advice. |
 | `docs/DEVLOG.md` | What changed in the scripts and why, plus open ideas. |
 | `tests/` | Offline Pester 5 tests for scope, status decisions, audit-window queries and API failure handling (`Invoke-Pester ./tests`). GitHub Actions runs them on every pull request. |
@@ -66,13 +67,13 @@ Malformed, duplicate or unrecognized `inScope` values stop the run rather than s
 ## Requirements
 
 - PowerShell 7+
-- Keep `Apim-Helpers.ps1` alongside the three entry scripts; clone/download the repository rather than copying one script alone
+- Keep `Apim-Helpers.ps1` alongside the entry scripts; clone/download the repository rather than copying one script alone
 - Azure CLI (`az`), signed in with `az login`
 - **Reader** on the subscriptions you want to cover
 - For the audit script: **Log Analytics Reader** on the workspaces that hold Key Vault logs
 - For the follow-up analysis: also directory read access in Entra ID, to resolve object IDs
 
-None of the scripts changes anything in Azure. They only read.
+The three analysis scripts are read-only. **The separate rotation script changes Azure resources** and requires suitable write/action permissions in addition to Reader.
 
 ## Usage
 
@@ -97,6 +98,29 @@ Output goes to `./apim-exposure/`, `./kv-audit/` and `./incident-analysis/`. It 
 Windows are UTC, with an inclusive start and exclusive end. Timestamps without a timezone are treated as UTC; local timestamps are converted to UTC. Sub-day boundaries are preserved in queries and analysis snapshots. `WindowStart` must precede `WindowEnd`, and `LookbackDays` must be positive. If the window predates the requested lookback, the scripts warn that the logs may not cover it.
 
 Warnings use PowerShell's warning stream. To preserve them locally, invoke the script directly from PowerShell, for example `.\Check-ApimExposure.ps1 3> .\scan-warnings.log`. Failed CLI commands, malformed responses, repeated continuation links and invalid required metadata never become successful empty scans. Log Analytics partial-error responses are treated as failed queries.
+
+### Rotating credentials
+
+Review [Microsoft's rotation guide](https://techcommunity.microsoft.com/blog/integrationsonazureblog/rotating-credentials-in-azure-api-management/4575478) and test in a non-production instance first. Run the exposure scan, review `scope.csv` and its preflight and failures, then select an explicit in-scope resource ID and credential. An in-scope finding is a precaution, not proof of compromise; an old scan may no longer reflect your environment. The script refuses targets absent from or excluded by `scope.csv`; it does not apply the SKU fallback.
+
+Each invocation performs **one** operation and prompts for confirmation by default. `-WhatIf` previews without contacting Azure. Regenerating a key immediately invalidates that key: first move and test every caller on the other key; regenerate and test the replacement; move callers to it before separately regenerating the other key. Do not rotate both keys together. Management actions target the legacy Direct Management API, not Git keys.
+
+```powershell
+$id = '/subscriptions/<azure-subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.ApiManagement/service/<apim-name>'
+# APIM subscription entity ID from apim-subscriptions.csv, not the Azure subscription ID
+.\Rotate-ApimCredential.ps1 -ResourceId $id -Action SubscriptionPrimary -ItemId '<apim-subscription-id>' -WhatIf
+.\Rotate-ApimCredential.ps1 -ResourceId $id -Action SubscriptionPrimary -ItemId '<apim-subscription-id>'
+# Only after callers have switched and been tested:
+.\Rotate-ApimCredential.ps1 -ResourceId $id -Action SubscriptionSecondary -ItemId '<apim-subscription-id>'
+.\Rotate-ApimCredential.ps1 -ResourceId $id -Action ManagementPrimary
+.\Rotate-ApimCredential.ps1 -ResourceId $id -Action ManagementSecondary
+
+# Named value ID from named-values.csv; the replacement is prompted for with hidden input
+.\Rotate-ApimCredential.ps1 -ResourceId $id -Action NamedValue -ItemId '<named-value-id>'
+.\Rotate-ApimCredential.ps1 -ResourceId $id -Action RefreshKeyVault -ItemId '<named-value-id>'
+```
+
+For named values, first create the replacement at its issuer. For Key Vault references, store the replacement in Key Vault and update any version-pinned reference before refresh. A `202 Accepted` response is **not completion**: check provisioning and test before revoking the old credential. The script does not read or print existing secrets, but avoid terminal recording and transcripts when entering replacements. Updating APIM does not revoke the old issuer credential. See [the response checklist](docs/response-checklist.md#2-rotate) for backend, OAuth, identity provider, logger, certificate, policy, Git and other externally managed credentials, which are not automatically changed.
 
 ### Reading the follow-up analysis
 

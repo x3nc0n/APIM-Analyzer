@@ -53,6 +53,8 @@ Otherwise use Entra admin center → Monitoring → Audit logs with the same fil
 
 ## 2. Rotate
 
+Follow [Microsoft's credential rotation guide](https://techcommunity.microsoft.com/blog/integrationsonazureblog/rotating-credentials-in-azure-api-management/4575478), testing first in non-production. The optional `Rotate-ApimCredential.ps1` handles one in-scope subscription or legacy management key, APIM secret named value, or Key Vault named-value refresh at a time; see the README for prerequisites and commands. An accepted asynchronous refresh/update is not proof of completion.
+
 - [ ] Rotate secrets stored in APIM and in Key Vaults reachable by APIM managed identities, production first
 - [ ] Rotate at the issuer; updating APIM alone does not invalidate the old credential
 - [ ] Regenerate subscription keys and move callers between primary and secondary keys
@@ -60,6 +62,13 @@ Otherwise use Entra admin center → Monitoring → Audit logs with the same fil
 - [ ] Replace certificates that were uploaded directly to APIM (their private keys were held by APIM)
 - [ ] Enable `AuditEvent` diagnostic logging on every Key Vault and keep retention long
 - [ ] Export relevant logs and extend retention before they age out
+
+For credentials not changed by the script:
+- [ ] Backends: create the replacement at the backend, update headers, query credentials or certificates without overwriting unrelated settings, and test before revoking the old credential
+- [ ] OAuth, OpenID Connect, developer portal identity providers and Credential Manager: create a replacement at the identity provider, update the matching APIM configuration, test and republish the developer portal if needed, then revoke the old credential
+- [ ] Event Hubs and other loggers: switch to a replacement connection string or identity, verify new events and other consumers, then renew/revoke the old issuer key
+- [ ] Policies: replace literal credentials at their issuer and reference a Key Vault-backed named value; inspect global, product, API and operation policies, then test before revocation
+- [ ] Git access and other credentials not supported by this script: rotate using the applicable Microsoft guidance and verify their consumers
 
 ## 3. Reporting timeline
 
