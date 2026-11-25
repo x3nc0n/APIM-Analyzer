@@ -59,6 +59,7 @@ Malformed, duplicate or unrecognized `inScope` values stop the run rather than s
 | `Check-KeyVaultAudit.ps1` | Can run without the exposure scan. Finds the vaults that APIM managed identities can read from, or can grant themselves access to. Checks whether audit logging is enabled, and queries Log Analytics for identity activity and new callers in a time window. |
 | `Analyze-Findings.ps1` | Follow-up analysis of the two scripts' output. Classifies the secrets held by APIM and flags environment mixing, reused secret names, all-access subscriptions, leftover logger credentials and literal backend credentials. Resolves flagged Key Vault callers in Entra ID, drills into their log history and gives each a heuristic verdict. Writes a Markdown report and can compare with a previous run. |
 | `Rotate-ApimCredential.ps1` | Opt-in, one-at-a-time subscription and legacy management key regeneration, APIM secret named-value updates, and Key Vault named-value refreshes. Requires a matching in-scope exposure scan and confirmation. |
+| `Test-FrontendHostnameFilter.ps1` | Standalone HTTPS frontend Host/SNI response-contract validator for Application Gateway or other ADCs. Requires PowerShell 7.2+ and curl; no Azure CLI or shared helper required. |
 | `Apim-Helpers.ps1` | Shared SKU, scope, identity, CLI, timestamp and response validation. Must remain alongside the entry scripts. |
 | `docs/response-checklist.md` | Generic checklist for persistence checks, rotation and reporting steps. Not legal advice. |
 | `docs/DEVLOG.md` | What changed in the scripts and why, plus open ideas. |
@@ -98,6 +99,28 @@ Output goes to `./apim-exposure/`, `./kv-audit/` and `./incident-analysis/`. It 
 Windows are UTC, with an inclusive start and exclusive end. Timestamps without a timezone are treated as UTC; local timestamps are converted to UTC. Sub-day boundaries are preserved in queries and analysis snapshots. `WindowStart` must precede `WindowEnd`, and `LookbackDays` must be positive. If the window predates the requested lookback, the scripts warn that the logs may not cover it.
 
 Warnings use PowerShell's warning stream. To preserve them locally, invoke the script directly from PowerShell, for example `.\Check-ApimExposure.ps1 3> .\scan-warnings.log`. Failed CLI commands, malformed responses, repeated continuation links and invalid required metadata never become successful empty scans. Log Analytics partial-error responses are treated as failed queries.
+
+### Validating frontend hostname filtering
+
+Run `Test-FrontendHostnameFilter.ps1` only against frontends you are authorized to test. It varies TLS SNI, HTTP Host and IP-address requests for one frontend IP and approved hostname. Unlike the Azure analysis scripts, it requires only **PowerShell 7.2+ and curl**; it does not require Azure CLI, Azure permissions or `Apim-Helpers.ps1`.
+
+```powershell
+.\Test-FrontendHostnameFilter.ps1 `
+    -FrontendIp '203.0.113.10' `
+    -GatewayHostname 'api.example.com' `
+    -UnapprovedHostname 'instance.management.azure-api.net' `
+    -Path '/health' `
+    -ApprovedBodyPattern '"service"\s*:\s*"orders-api"' `
+    -RejectionStatusCode 403 `
+    -RejectionBodyPattern 'EDGE-HOSTNAME-DENIED' `
+    -OutputPath '.\frontend-result.json'
+```
+
+Replace the example application and denial markers with verified responses from your application and edge. A rejection status alone cannot earn PASS. You can use `-RejectionHeaderPattern` instead of, or alongside, `-RejectionBodyPattern`; when both are supplied, both must match. Add `-RequireSniMatch` to require rejection for unapproved or absent SNI even when HTTP Host is approved. Otherwise those SNI-only cases are informational.
+
+Exit codes are **0 = PASS**, **1 = FAIL**, **2 = INCONCLUSIVE**; invalid input and runtime errors terminate with an error. Transport/TLS failures are inconclusive, never proof of enforcement. The approved control verifies TLS (`-CertificateAuthorityFile` supports a private CA); negative probes deliberately skip certificate verification. Redirects are not followed. JSON reports contain request metadata and body hashes rather than response bodies, and existing reports are not overwritten. Keep reports private; JSON files are already ignored by Git.
+
+**PASS only means the observed HTTP/1.1 responses matched the configured contract.** It does not certify configuration, historical isolation or exploit resistance. Verify no forwarding using complete edge/backend telemetry, repeat for every frontend IP and approved hostname, and assess direct-backend access separately. See the script's opening comment and parameter block for further examples and options.
 
 ### Rotating credentials
 
